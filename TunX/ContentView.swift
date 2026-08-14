@@ -10,50 +10,97 @@ import SwiftData
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @Query(sort: \Tunnel.createdAt, order: .reverse) private var tunnels: [Tunnel]
+
+    @StateObject private var manager = TunnelManager.shared
+    @State private var selectedTunnelID: UUID?
+
+    var selectedTunnel: Tunnel? {
+        tunnels.first { $0.id == selectedTunnelID }
+    }
 
     var body: some View {
         NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+            List(selection: $selectedTunnelID) {
+                ForEach(tunnels) { tunnel in
+                    NavigationLink(value: tunnel.id) {
+                        TunnelListRowView(tunnel: tunnel)
                     }
+                    .tag(tunnel.id)
                 }
-                .onDelete(perform: deleteItems)
+                .onDelete(perform: deleteTunnels)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .navigationTitle("隧道")
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260)
             .toolbar {
                 ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+                    Button(action: addTunnel) {
+                        Label("新建隧道", systemImage: "plus")
                     }
+                }
+                ToolbarItem {
+                    Button(action: deleteSelectedTunnel) {
+                        Label("删除", systemImage: "trash")
+                    }
+                    .disabled(selectedTunnel == nil)
                 }
             }
         } detail: {
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+            if let tunnel = selectedTunnel {
+                TunnelEditorView(tunnel: tunnel)
+                    .id(tunnel.id)
+            } else {
+                ContentUnavailableView {
+                    Label("未选择隧道", systemImage: "network")
+                } description: {
+                    Text("点击左侧 + 创建或选择一条隧道")
+                }
             }
+        }
+    }
+
+    private func addTunnel() {
+        let defaultRule = ForwardRule(
+            type: .local,
+            localHost: "127.0.0.1",
+            localPort: 8080,
+            remoteHost: "localhost",
+            remotePort: 80
+        )
+        let tunnel = Tunnel(
+            name: "新隧道",
+            host: "example.com",
+            port: 22,
+            user: "root",
+            authMethod: .identityFile,
+            rules: [defaultRule]
+        )
+        modelContext.insert(tunnel)
+        selectedTunnelID = tunnel.id
+    }
+
+    private func deleteSelectedTunnel() {
+        guard let tunnel = selectedTunnel else { return }
+        deleteTunnel(tunnel)
+    }
+
+    private func deleteTunnels(offsets: IndexSet) {
+        for index in offsets {
+            deleteTunnel(tunnels[index])
+        }
+    }
+
+    private func deleteTunnel(_ tunnel: Tunnel) {
+        manager.stop(tunnel)
+        manager.clearKeychainItems(for: tunnel)
+        modelContext.delete(tunnel)
+        if selectedTunnelID == tunnel.id {
+            selectedTunnelID = nil
         }
     }
 }
 
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .modelContainer(for: [Tunnel.self, ForwardRule.self], inMemory: true)
 }
