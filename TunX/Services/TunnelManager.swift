@@ -42,6 +42,15 @@ extension TunnelState {
             return Color.red
         }
     }
+
+    var isActive: Bool {
+        switch self {
+        case .running, .starting, .reconnecting:
+            return true
+        case .stopped, .stopping, .error:
+            return false
+        }
+    }
 }
 
 struct TunnelStatus {
@@ -80,6 +89,7 @@ final class TunnelManager: ObservableObject {
     static let shared = TunnelManager()
 
     @Published private(set) var statuses: [UUID: TunnelStatus] = [:]
+    @Published private(set) var hasActiveConnection = false
 
     private var sessions: [UUID: RunningSession] = [:]
     private var reconnectTasks: [UUID: Task<Void, Never>] = [:]
@@ -94,8 +104,7 @@ final class TunnelManager: ObservableObject {
     }
 
     func isRunning(_ tunnel: Tunnel) -> Bool {
-        let state = status(for: tunnel).state
-        return state == .running || state == .starting || state == .reconnecting
+        status(for: tunnel).state.isActive
     }
 
     func toggle(_ tunnel: Tunnel) {
@@ -295,6 +304,14 @@ final class TunnelManager: ObservableObject {
         if let pid = pid { status.pid = pid }
         if let nextReconnect = nextReconnect { status.nextReconnect = nextReconnect }
         statuses[id] = status
+        refreshActiveConnection()
+    }
+
+    private func refreshActiveConnection() {
+        let active = statuses.values.contains { $0.state.isActive }
+        if hasActiveConnection != active {
+            hasActiveConnection = active
+        }
     }
 
     private func appendLog(id: UUID, text: String) {

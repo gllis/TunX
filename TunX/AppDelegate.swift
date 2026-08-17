@@ -8,11 +8,13 @@
 import SwiftUI
 import AppKit
 import SwiftData
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var mainWindowController: NSWindowController?
+    private var cancellables = Set<AnyCancellable>()
 
     lazy var modelContainer: ModelContainer = {
         let schema = Schema([
@@ -37,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupMainWindow()
         observeNotifications()
+        observeTunnelStatus()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -48,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = makeStatusBarIcon()
-        item.button?.image?.isTemplate = true
+        item.button?.imageScaling = .scaleProportionallyDown
         item.button?.toolTip = "TunX"
 
         let menu = NSMenu()
@@ -56,13 +59,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.menu = menu
 
         statusItem = item
+        updateStatusBarAppearance(active: TunnelManager.shared.hasActiveConnection)
     }
 
     private func makeStatusBarIcon() -> NSImage? {
-        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .heavy)
-        let image = NSImage(systemSymbolName: "network", accessibilityDescription: "TunX")?
-            .withSymbolConfiguration(config)
-        image?.isTemplate = true
+        guard let original = NSImage(named: "StatusBarIcon") else {
+            return NSImage(systemSymbolName: "network", accessibilityDescription: "TunX")
+        }
+        let image = original.copy() as? NSImage ?? original
+        image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
         return image
     }
 
@@ -97,6 +103,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWindow.willCloseNotification,
             object: mainWindowController?.window
         )
+    }
+
+    private func observeTunnelStatus() {
+        TunnelManager.shared.$hasActiveConnection
+            .sink { [weak self] active in
+                self?.updateStatusBarAppearance(active: active)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func updateStatusBarAppearance(active: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.alphaValue = active ? 1.0 : 0.78
     }
 
     // MARK: - Status Menu
