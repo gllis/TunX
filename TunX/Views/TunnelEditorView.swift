@@ -135,7 +135,7 @@ struct TunnelEditorView: View {
         .formStyle(.grouped)
         .padding()
         .onAppear {
-            loadKeychainValues()
+            loadPersistedValues()
         }
         .onChange(of: savePassword) { _, newValue in
             persistPassword(save: newValue)
@@ -180,12 +180,25 @@ struct TunnelEditorView: View {
 
     // MARK: - Keychain
 
-    private func loadKeychainValues() {
+    private func loadPersistedValues() {
         password = KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id)) ?? ""
         savePassword = !password.isEmpty
 
         keyPassphrase = KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id)) ?? ""
         saveKeyPassphrase = !keyPassphrase.isEmpty
+
+        loadIdentityBookmark()
+    }
+
+    private func loadIdentityBookmark() {
+        guard let data = tunnel.identityBookmarkData else { return }
+        do {
+            let url = try SecurityScopedBookmark.resolve(data)
+            tunnel.identityFilePath = url.path
+        } catch {
+            print("私钥书签已失效: \(error)")
+            tunnel.identityBookmarkData = nil
+        }
     }
 
     private func persistPassword(save: Bool) {
@@ -225,7 +238,14 @@ struct TunnelEditorView: View {
         panel.canChooseFiles = true
         panel.begin { result in
             if result == .OK, let url = panel.url {
-                tunnel.identityFilePath = url.path
+                do {
+                    let data = try SecurityScopedBookmark.create(for: url)
+                    tunnel.identityBookmarkData = data
+                    tunnel.identityFilePath = url.path
+                } catch {
+                    print("创建私钥书签失败: \(error)")
+                    tunnel.identityFilePath = url.path
+                }
             }
         }
     }

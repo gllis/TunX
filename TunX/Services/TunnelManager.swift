@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import SwiftUI
 
 enum TunnelState: String {
     case stopped
@@ -29,13 +30,16 @@ extension TunnelState {
         }
     }
 
-    var colorName: String {
+    var color: Color {
         switch self {
-        case .stopped: return "statusStopped"
-        case .starting, .reconnecting: return "statusPending"
-        case .running: return "statusRunning"
-        case .stopping: return "statusPending"
-        case .error: return "statusError"
+        case .stopped:
+            return Color.secondary
+        case .starting, .stopping, .reconnecting:
+            return Color.orange
+        case .running:
+            return Color.green
+        case .error:
+            return Color.red
         }
     }
 }
@@ -57,8 +61,18 @@ enum KeychainAccount {
 private struct RunningSession {
     let process: Process
     let tunnel: Tunnel
-    let askpassURL: URL?
+    let credentialURL: URL?
+    let identityURL: URL?
     var manuallyStopped: Bool = false
+
+    func cleanup() {
+        if let url = identityURL {
+            url.stopAccessingSecurityScopedResource()
+        }
+        if let url = credentialURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
 }
 
 @MainActor
@@ -98,6 +112,9 @@ final class TunnelManager: ObservableObject {
 
         updateStatus(id: tunnel.id, state: .starting)
 
+        var identityURL: URL?
+        var credentialURL: URL?
+
         do {
             let password: String? = {
                 guard tunnel.authMethod == .password else { return nil }
@@ -115,57 +132,87 @@ final class TunnelManager: ObservableObject {
                 keyPassphrase: keyPassphrase
             )
 
+            var environment = ProcessInfo.processInfo.environment
+
+            // 安全作用域书签：启动前开始访问私钥文件
+            if tunnel.authMethod == .identityFile,
+               let bookmarkData = tunnel.identityBookmarkData {
+                identityURL = try SecurityScopedBookmark.resolve(bookmarkData)
+                _ = identityURL?.startAccessingSecurityScopedResource()
+            }
+
+            // 凭证通过 Bundle 内的 askpass 脚本 + 临时文件注入
+            if let credential = invocation.credential, !credential.isEmpty {
+                guard let askpassScript = Bundle.main.url(forResource: "askpass", withExtension: "sh") else {
+                    throw SSHCommandBuilderError.invalidRule
+                }
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("tunx-cred-\(UUID().uuidString).txt")
+                try credential.write(to: url, atomically: true, encoding: .utf8)
+                environment["TUNX_SSH_ASKPASS_FILE"] = url.path
+                environment["SSH_ASKPASS"] = askpassScript.path
+                environment["SSH_ASKPASS_REQUIRE"] = "force"
+                environment["DISPLAY"] = ":0"
+                credentialURL = url
+            }
+
             let process = Process()
             process.executableURL = URL(fileURLWithPath: SSHCommandBuilder.sshPath)
             process.arguments = invocation.arguments
-
-            var environment = ProcessInfo.processInfo.environment
-            for (key, value) in invocation.environment {
-                environment[key] = value
-            }
             process.environment = environment
 
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = pipe
 
-            let session = RunningSession(process: process, tunnel: tunnel, askpassURL: invocation.askpassURL)
-            sessions[tunnel.id] = session
+            let session = RunningSession(
+                process: process,
+                tunnel: tunnel,
+                credentialURL: credentialURL,
+                identityURL: identityURL
+            )
+            let tunnelID = tunnel.id
+            sessions[tunnelID] = session
 
             pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 guard let self = self,
                       let text = String(data: data, encoding: .utf8),
                       !text.isEmpty else { return }
-                Task { @MainActor in
-                    self.appendLog(id: tunnel.id, text: text)
+                Task { @MainActor [tunnelID] in
+                    self.appendLog(id: tunnelID, text: text)
                 }
             }
 
             process.terminationHandler = { [weak self] process in
-                Task { @MainActor in
-                    self?.handleTermination(tunnelID: tunnel.id, exitCode: Int(process.terminationStatus))
+                Task { @MainActor [tunnelID] in
+                    self?.handleTermination(tunnelID: tunnelID, exitCode: Int(process.terminationStatus))
                 }
             }
 
             try process.run()
-            updateStatus(id: tunnel.id, state: .running, pid: process.processIdentifier)
-            appendLog(id: tunnel.id, text: "[TunX] 启动 ssh (pid: \(process.processIdentifier))\n")
-            appendLog(id: tunnel.id, text: "[TunX] 命令: ssh \(invocation.arguments.joined(separator: " "))\n")
+            updateStatus(id: tunnelID, state: .running, pid: process.processIdentifier)
+            appendLog(id: tunnelID, text: "[TunX] 启动 ssh (pid: \(process.processIdentifier))\n")
+            appendLog(id: tunnelID, text: "[TunX] 命令: ssh \(invocation.arguments.joined(separator: " "))\n")
         } catch {
+            identityURL?.stopAccessingSecurityScopedResource()
+            if let url = credentialURL {
+                try? FileManager.default.removeItem(at: url)
+            }
             updateStatus(id: tunnel.id, state: .error, lastError: error.localizedDescription)
             appendLog(id: tunnel.id, text: "[TunX] 启动失败: \(error.localizedDescription)\n")
         }
     }
 
     func stop(_ tunnel: Tunnel) {
-        guard var session = sessions[tunnel.id] else {
+        guard let session = sessions[tunnel.id] else {
             cancelReconnect(for: tunnel.id)
             updateStatus(id: tunnel.id, state: .stopped)
             return
         }
-        session.manuallyStopped = true
-        sessions[tunnel.id] = session
+        var updated = session
+        updated.manuallyStopped = true
+        sessions[tunnel.id] = updated
         updateStatus(id: tunnel.id, state: .stopping)
         session.process.terminate()
         appendLog(id: tunnel.id, text: "[TunX] 用户请求停止\n")
@@ -199,7 +246,7 @@ final class TunnelManager: ObservableObject {
 
     private func handleTermination(tunnelID: UUID, exitCode: Int) {
         guard let session = sessions[tunnelID] else { return }
-        SSHCommandBuilder.cleanupAskpass(session.askpassURL)
+        session.cleanup()
         sessions.removeValue(forKey: tunnelID)
 
         if session.manuallyStopped {

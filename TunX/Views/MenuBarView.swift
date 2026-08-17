@@ -9,7 +9,6 @@ import SwiftUI
 import SwiftData
 
 struct MenuBarView: View {
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Tunnel.createdAt) private var tunnels: [Tunnel]
     @StateObject private var manager = TunnelManager.shared
@@ -51,8 +50,7 @@ struct MenuBarView: View {
                 .padding(.vertical, 4)
 
             Button {
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
+                NotificationCenter.default.post(name: .openTunXMainWindow, object: nil)
                 dismiss()
             } label: {
                 HStack {
@@ -65,18 +63,6 @@ struct MenuBarView: View {
             }
             .buttonStyle(.plain)
 
-            Button {
-                NSApplication.shared.terminate(nil)
-            } label: {
-                HStack {
-                    Image(systemName: "power")
-                    Text("退出")
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
         }
         .padding(.vertical, 8)
     }

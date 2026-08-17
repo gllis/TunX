@@ -9,18 +9,14 @@ import Foundation
 
 struct SSHInvocation {
     let arguments: [String]
-    let environment: [String: String]
-    let askpassURL: URL?
+    let credential: String?
 }
 
 enum SSHCommandBuilderError: Error, LocalizedError {
-    case missingCredential
     case invalidRule
 
     var errorDescription: String? {
         switch self {
-        case .missingCredential:
-            return "缺少密码或私钥口令"
         case .invalidRule:
             return "转发规则不完整"
         }
@@ -47,7 +43,6 @@ final class SSHCommandBuilder {
             args += ["-p", String(tunnel.port)]
         }
 
-        var env: [String: String] = [:]
         var credential: String?
 
         switch tunnel.authMethod {
@@ -64,15 +59,6 @@ final class SSHCommandBuilder {
             credential = password
         }
 
-        var askpassURL: URL?
-        if let cred = credential, !cred.isEmpty {
-            let url = try createAskpassScript(credential: cred)
-            askpassURL = url
-            env["SSH_ASKPASS"] = url.path
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["DISPLAY"] = ":0"
-        }
-
         for rule in tunnel.rules {
             let flag = try forwardFlag(for: rule)
             args += [flag.0, flag.1]
@@ -82,9 +68,13 @@ final class SSHCommandBuilder {
             args += tokenize(tunnel.extraOptions)
         }
 
+        // 指向真实主目录的 known_hosts，保持与系统 OpenSSH 主机密钥一致
+        let knownHosts = "\(realHomeDirectory())/.ssh/known_hosts"
+        args += ["-o", "UserKnownHostsFile=\(knownHosts)"]
+
         args += [tunnel.destination]
 
-        return SSHInvocation(arguments: args, environment: env, askpassURL: askpassURL)
+        return SSHInvocation(arguments: args, credential: credential)
     }
 
     private static func forwardFlag(for rule: ForwardRule) throws -> (String, String) {
@@ -110,21 +100,6 @@ final class SSHCommandBuilder {
             let bind = rule.localHost.isEmpty ? "\(rule.localPort)" : "\(rule.localHost):\(rule.localPort)"
             return ("-D", bind)
         }
-    }
-
-    private static func createAskpassScript(credential: String) throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tunx-askpass-\(UUID().uuidString).sh")
-        let escaped = credential.replacingOccurrences(of: "'", with: "'\\''")
-        let script = "#!/bin/sh\nprintf '%s\\n' '\(escaped)'\n"
-        try script.write(to: url, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-        return url
-    }
-
-    static func cleanupAskpass(_ url: URL?) {
-        guard let url = url else { return }
-        try? FileManager.default.removeItem(at: url)
     }
 
     static func tokenize(_ input: String) -> [String] {

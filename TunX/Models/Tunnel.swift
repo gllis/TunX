@@ -31,6 +31,7 @@ final class Tunnel {
     var user: String
     var authMethodRaw: String
     var identityFilePath: String?
+    var identityBookmarkData: Data?
     var extraOptions: String
     var autoReconnect: Bool
     var reconnectDelay: Int
@@ -47,6 +48,7 @@ final class Tunnel {
         user: String = "",
         authMethod: AuthMethod = .identityFile,
         identityFilePath: String? = nil,
+        identityBookmarkData: Data? = nil,
         extraOptions: String = "",
         autoReconnect: Bool = true,
         reconnectDelay: Int = 5,
@@ -59,6 +61,7 @@ final class Tunnel {
         self.user = user
         self.authMethodRaw = authMethod.rawValue
         self.identityFilePath = identityFilePath
+        self.identityBookmarkData = identityBookmarkData
         self.extraOptions = extraOptions
         self.autoReconnect = autoReconnect
         self.reconnectDelay = reconnectDelay
