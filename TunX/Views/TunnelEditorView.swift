@@ -56,9 +56,10 @@ struct TunnelEditorView: View {
 
             Section("转发规则") {
                 ForEach($tunnel.rules) { $rule in
-                    ForwardRuleEditor(rule: $rule)
+                    ForwardRuleEditor(rule: $rule) {
+                        deleteRule($rule.wrappedValue)
+                    }
                 }
-                .onDelete(perform: deleteRule)
 
                 Button("添加规则") {
                     let rule = ForwardRule(
@@ -227,8 +228,9 @@ struct TunnelEditorView: View {
 
     // MARK: - Actions
 
-    private func deleteRule(at offsets: IndexSet) {
-        tunnel.rules.remove(atOffsets: offsets)
+    private func deleteRule(_ rule: ForwardRule) {
+        tunnel.rules.removeAll { $0.id == rule.id }
+        modelContext.delete(rule)
     }
 
     private func chooseIdentityFile() {
@@ -281,18 +283,28 @@ private struct StatusBadge: View {
 
 private struct ForwardRuleEditor: View {
     @Binding var rule: ForwardRule
+    var onDelete: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("类型", selection: Binding(
-                get: { rule.type },
-                set: { rule.type = $0 }
-            )) {
-                ForEach(ForwardType.allCases) { type in
-                    Text(type.label).tag(type)
+            HStack(alignment: .center, spacing: 8) {
+                Picker("类型", selection: Binding(
+                    get: { rule.type },
+                    set: { rule.type = $0 }
+                )) {
+                    ForEach(ForwardType.allCases) { type in
+                        Text(type.label).tag(type)
+                    }
                 }
+                .pickerStyle(.segmented)
+
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.borderless)
+                .help("删除规则")
             }
-            .pickerStyle(.segmented)
 
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {

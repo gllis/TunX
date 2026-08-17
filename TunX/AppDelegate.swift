@@ -12,8 +12,6 @@ import SwiftData
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
-    private var contextMenu: NSMenu?
     private var mainWindowController: NSWindowController?
 
     lazy var modelContainer: ModelContainer = {
@@ -37,8 +35,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         setupStatusItem()
-        setupPopover()
-        setupContextMenu()
         setupMainWindow()
         observeNotifications()
     }
@@ -51,29 +47,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "network", accessibilityDescription: "TunX")
-        item.button?.target = self
-        item.button?.action = #selector(statusBarButtonClicked(_:))
-        item.button?.sendAction(on: NSEvent.EventTypeMask([.leftMouseUp, .rightMouseUp]))
+        item.button?.image = makeStatusBarIcon()
+        item.button?.image?.isTemplate = true
+        item.button?.toolTip = "TunX"
+
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+
         statusItem = item
     }
 
-    private func setupPopover() {
-        let popover = NSPopover()
-        popover.contentSize = NSSize(width: 240, height: 320)
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: MenuBarView().modelContainer(modelContainer)
-        )
-        self.popover = popover
-    }
-
-    private func setupContextMenu() {
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "打开 TunX", action: #selector(openMainWindow), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApplication), keyEquivalent: "q"))
-        self.contextMenu = menu
+    private func makeStatusBarIcon() -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .heavy)
+        let image = NSImage(systemSymbolName: "network", accessibilityDescription: "TunX")?
+            .withSymbolConfiguration(config)
+        image?.isTemplate = true
+        return image
     }
 
     private func setupMainWindow() {
@@ -109,27 +99,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    // MARK: - Actions
+    // MARK: - Status Menu
 
-    @objc private func statusBarButtonClicked(_ sender: Any?) {
-        guard let event = NSApp.currentEvent else { return }
+    private func rebuildStatusMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
 
-        if event.type == .rightMouseUp {
-            showContextMenu()
+        let tunnels = fetchTunnels()
+        let manager = TunnelManager.shared
+
+        if tunnels.isEmpty {
+            let emptyItem = NSMenuItem(title: "暂无隧道", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            menu.addItem(emptyItem)
         } else {
-            togglePopover()
+            for tunnel in tunnels {
+                let status = manager.status(for: tunnel)
+                let item = NSMenuItem(
+                    title: "\(tunnel.displayName)  —  \(status.state.label)",
+                    action: #selector(toggleTunnel(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = tunnel.id
+                item.state = menuState(for: status.state)
+                item.image = statusDotImage(for: status.state)
+                item.toolTip = tooltip(for: tunnel, status: status)
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(.separator())
+
+        let openItem = NSMenuItem(title: "打开 TunX", action: #selector(openMainWindow), keyEquivalent: "")
+        openItem.target = self
+        menu.addItem(openItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "退出", action: #selector(quitApplication), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+    }
+
+    private func fetchTunnels() -> [Tunnel] {
+        let descriptor = FetchDescriptor<Tunnel>(sortBy: [SortDescriptor(\.createdAt)])
+        return (try? modelContainer.mainContext.fetch(descriptor)) ?? []
+    }
+
+    private func menuState(for state: TunnelState) -> NSControl.StateValue {
+        switch state {
+        case .running:
+            return .on
+        case .starting, .stopping, .reconnecting:
+            return .mixed
+        case .stopped, .error:
+            return .off
         }
     }
 
-    private func showContextMenu() {
-        guard let statusItem = statusItem, let contextMenu = contextMenu else { return }
-        statusItem.menu = contextMenu
-        statusItem.button?.performClick(nil)
-        statusItem.menu = nil
+    private func statusDotImage(for state: TunnelState) -> NSImage {
+        let color: NSColor
+        switch state {
+        case .stopped:
+            color = .secondaryLabelColor
+        case .starting, .stopping, .reconnecting:
+            color = .systemOrange
+        case .running:
+            color = .systemGreen
+        case .error:
+            color = .systemRed
+        }
+
+        let size = NSSize(width: 12, height: 12)
+        let image = NSImage(size: size, flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    private func tooltip(for tunnel: Tunnel, status: TunnelStatus) -> String {
+        if status.state == .error, let lastError = status.lastError, !lastError.isEmpty {
+            return lastError
+        }
+        return TunnelManager.shared.isRunning(tunnel) ? "点击断开" : "点击连接"
+    }
+
+    // MARK: - Actions
+
+    @objc private func toggleTunnel(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        let targetID = id
+        let descriptor = FetchDescriptor<Tunnel>(
+            predicate: #Predicate { $0.id == targetID }
+        )
+        guard let tunnel = try? modelContainer.mainContext.fetch(descriptor).first else { return }
+        TunnelManager.shared.toggle(tunnel)
     }
 
     @objc private func openMainWindow() {
-        closePopover()
         mainWindowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -142,19 +212,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func mainWindowWillClose(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
     }
+}
 
-    private func togglePopover() {
-        guard let popover = popover, let button = statusItem?.button else { return }
-
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        }
-    }
-
-    private func closePopover() {
-        popover?.performClose(nil)
+extension AppDelegate: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuildStatusMenu(menu)
     }
 }
 
