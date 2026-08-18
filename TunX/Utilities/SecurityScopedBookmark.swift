@@ -2,7 +2,7 @@
 //  SecurityScopedBookmark.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import Foundation
@@ -24,6 +24,7 @@ enum BookmarkError: Error, LocalizedError {
     }
 }
 
+/// 沙盒内访问用户选取文件所需的安全作用域书签。
 struct SecurityScopedBookmark {
     static func create(for url: URL) throws -> Data {
         do {
@@ -56,6 +57,7 @@ struct SecurityScopedBookmark {
     }
 }
 
+/// 沙盒容器内 `NSHomeDirectory()` 不是真实家目录，known_hosts 需指向用户主目录。
 func realHomeDirectory() -> String {
     let containerHome = NSHomeDirectory()
     guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else {

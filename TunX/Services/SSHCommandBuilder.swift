@@ -2,17 +2,19 @@
 //  SSHCommandBuilder.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import Foundation
 
 struct SSHInvocation {
     let arguments: [String]
+    /// 供 SSH_ASKPASS 读取的密码或私钥口令；无凭证时为 nil。
     let credential: String?
 }
 
 enum SSHCommandBuilderError: Error, LocalizedError {
+    /// 转发规则缺少必要端口或主机。
     case invalidRule
 
     var errorDescription: String? {
@@ -23,6 +25,7 @@ enum SSHCommandBuilderError: Error, LocalizedError {
     }
 }
 
+/// 根据隧道配置生成 OpenSSH 参数。
 final class SSHCommandBuilder {
     static let sshPath = "/usr/bin/ssh"
 
@@ -32,7 +35,7 @@ final class SSHCommandBuilder {
         keyPassphrase: String? = nil
     ) throws -> SSHInvocation {
         var args: [String] = [
-            "-N",
+            "-N", // 只做端口转发，不打开远程 shell
             "-o", "ServerAliveInterval=60",
             "-o", "ServerAliveCountMax=3",
             "-o", "ExitOnForwardFailure=yes",
@@ -90,6 +93,7 @@ final class SSHCommandBuilder {
             guard rule.localPort > 0, rule.remotePort > 0 else {
                 throw SSHCommandBuilderError.invalidRule
             }
+            // -R 的绑定地址在远端，目标地址在本地侧
             let remoteBind = rule.localHost.isEmpty ? "\(rule.localPort)" : "\(rule.localHost):\(rule.localPort)"
             let localTarget = "\(rule.remoteHost):\(rule.remotePort)"
             return ("-R", "\(remoteBind):\(localTarget)")
@@ -102,6 +106,7 @@ final class SSHCommandBuilder {
         }
     }
 
+    /// 将用户填写的额外选项按 shell 规则拆成参数（支持引号与转义）。
     static func tokenize(_ input: String) -> [String] {
         var tokens: [String] = []
         var current = ""

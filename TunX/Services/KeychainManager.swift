@@ -2,7 +2,7 @@
 //  KeychainManager.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import Foundation
@@ -28,6 +28,7 @@ enum KeychainError: Error, LocalizedError {
     }
 }
 
+/// 使用 Generic Password 存取隧道密码与私钥口令。
 final class KeychainManager {
     static let shared = KeychainManager()
 
@@ -38,6 +39,7 @@ final class KeychainManager {
     }
 
     func savePassword(_ password: String, account: String, label: String? = nil) throws {
+        // 先删后加，避免钥匙串重复项
         try deletePassword(account: account)
 
         guard let data = password.data(using: .utf8) else {
@@ -49,6 +51,7 @@ final class KeychainManager {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
+            // 解锁后可读取，便于开机后自动重连
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
         if let label = label {

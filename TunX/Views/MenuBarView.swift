@@ -2,12 +2,13 @@
 //  MenuBarView.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import SwiftUI
 import SwiftData
 
+/// 旧版状态栏弹出层（当前状态栏已改用系统 NSMenu，此视图保留备用）。
 struct MenuBarView: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Tunnel.createdAt) private var tunnels: [Tunnel]

@@ -26,8 +26,6 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		63B0C2E2302E1CB800336607 /* TunX */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = TunX;
 			sourceTree = "<group>";
 		};
@@ -293,9 +291,9 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_LSUIElement = YES;
-INFOPLIST_KEY_NSLocalNetworkUsageDescription = "TunX 需要通过本地网络连接 SSH 隧道目标。";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "TunX 需要通过本地网络连接 SSH 隧道目标。";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -326,9 +324,9 @@ INFOPLIST_KEY_NSLocalNetworkUsageDescription = "TunX 需要通过本地网络连
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_LSUIElement = YES;
-INFOPLIST_KEY_NSLocalNetworkUsageDescription = "TunX 需要通过本地网络连接 SSH 隧道目标。";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "TunX 需要通过本地网络连接 SSH 隧道目标。";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

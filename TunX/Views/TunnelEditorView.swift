@@ -2,12 +2,13 @@
 //  TunnelEditorView.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import SwiftUI
 import SwiftData
 
+/// 隧道详情编辑页：基本信息、认证、转发规则、高级选项与日志。
 struct TunnelEditorView: View {
     @Environment(\.modelContext) private var modelContext
     @Bindable var tunnel: Tunnel
@@ -168,6 +169,7 @@ struct TunnelEditorView: View {
         )
     }
 
+    /// 将 Int 字段绑定到 TextField；非法输入会被忽略。
     private func intBinding(for keyPath: ReferenceWritableKeyPath<Tunnel, Int>) -> Binding<String> {
         Binding(
             get: { String(tunnel[keyPath: keyPath]) },
@@ -181,6 +183,7 @@ struct TunnelEditorView: View {
 
     // MARK: - Keychain
 
+    /// 从钥匙串与书签恢复密码、口令及私钥路径。
     private func loadPersistedValues() {
         password = KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id)) ?? ""
         savePassword = !password.isEmpty
@@ -228,11 +231,13 @@ struct TunnelEditorView: View {
 
     // MARK: - Actions
 
+    /// 从关系中移除并删除 SwiftData 对象。
     private func deleteRule(_ rule: ForwardRule) {
         tunnel.rules.removeAll { $0.id == rule.id }
         modelContext.delete(rule)
     }
 
+    /// 通过系统文件面板选择私钥，并保存安全作用域书签。
     private func chooseIdentityFile() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
@@ -261,6 +266,7 @@ struct TunnelEditorView: View {
 
 // MARK: - Status Badge
 
+/// 连接状态胶囊标签。
 private struct StatusBadge: View {
     let state: TunnelState
 
@@ -281,6 +287,7 @@ private struct StatusBadge: View {
 
 // MARK: - Forward Rule Editor
 
+/// 单条转发规则编辑器，右侧垃圾桶可删除该规则。
 private struct ForwardRuleEditor: View {
     @Binding var rule: ForwardRule
     var onDelete: () -> Void
@@ -355,6 +362,7 @@ private struct ForwardRuleEditor: View {
 
 // MARK: - Log View
 
+/// ssh 输出日志滚动区域。
 private struct LogView: View {
     let log: String
 

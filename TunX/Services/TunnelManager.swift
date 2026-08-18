@@ -2,13 +2,14 @@
 //  TunnelManager.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import Foundation
 import Combine
 import SwiftUI
 
+/// 隧道运行状态。
 enum TunnelState: String {
     case stopped
     case starting
@@ -43,6 +44,7 @@ extension TunnelState {
         }
     }
 
+    /// 启动中、运行中、重连中视为“占用中”，用于状态栏与启停按钮。
     var isActive: Bool {
         switch self {
         case .running, .starting, .reconnecting:
@@ -53,6 +55,7 @@ extension TunnelState {
     }
 }
 
+/// 单条隧道的运行时状态（不写入 SwiftData）。
 struct TunnelStatus {
     let tunnelID: UUID
     var state: TunnelState = .stopped
@@ -62,17 +65,22 @@ struct TunnelStatus {
     var nextReconnect: Date?
 }
 
+/// 钥匙串条目账号，按隧道 ID 区分密码与私钥口令。
 enum KeychainAccount {
     static func password(_ id: UUID) -> String { "\(id.uuidString).password" }
     static func keyPassphrase(_ id: UUID) -> String { "\(id.uuidString).keyPassphrase" }
 }
 
+/// 正在运行的 ssh 进程及其沙盒资源。
 private struct RunningSession {
     let process: Process
     let tunnel: Tunnel
     let credentialURL: URL?
     let identityURL: URL?
+    /// 用户主动停止，进程退出后不得自动重连。
     var manuallyStopped: Bool = false
+    /// 是否已进入运行中（process.run 成功）。仅此类异常断开才允许重连。
+    var didConnect: Bool = false
 
     func cleanup() {
         if let url = identityURL {
@@ -84,18 +92,28 @@ private struct RunningSession {
     }
 }
 
+/// 隧道进程管理：启动/停止 ssh，并在异常断开且有网络时自动重连。
 @MainActor
 final class TunnelManager: ObservableObject {
     static let shared = TunnelManager()
 
     @Published private(set) var statuses: [UUID: TunnelStatus] = [:]
+    /// 至少有一条隧道处于占用中时，状态栏图标使用正常亮度。
     @Published private(set) var hasActiveConnection = false
 
     private var sessions: [UUID: RunningSession] = [:]
     private var reconnectTasks: [UUID: Task<Void, Never>] = [:]
+    /// 曾成功连接、异常断开后等待重连的隧道。
+    private var reconnectCandidates: [UUID: Tunnel] = [:]
+    /// 用户手动停止过的隧道，网络恢复后不得自动拉起。
+    private var userStoppedIDs: Set<UUID> = []
+    private var networkResumeTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
     private let maxLogLines = 500
 
-    private init() {}
+    private init() {
+        observeNetwork()
+    }
 
     // MARK: - Public API
 
@@ -115,9 +133,19 @@ final class TunnelManager: ObservableObject {
         }
     }
 
+    /// 用户手动启动。
     func start(_ tunnel: Tunnel) {
+        start(tunnel, isReconnect: false)
+    }
+
+    /// - Parameter isReconnect: 自动重连时保留候选队列，避免被当成用户重新启动。
+    private func start(_ tunnel: Tunnel, isReconnect: Bool) {
         guard sessions[tunnel.id] == nil else { return }
         cancelReconnect(for: tunnel.id)
+        if !isReconnect {
+            userStoppedIDs.remove(tunnel.id)
+            reconnectCandidates.removeValue(forKey: tunnel.id)
+        }
 
         updateStatus(id: tunnel.id, state: .starting)
 
@@ -200,22 +228,36 @@ final class TunnelManager: ObservableObject {
             }
 
             try process.run()
+            // process.run 成功即视为已连接，后续异常退出才进入重连队列
+            if var current = sessions[tunnelID] {
+                current.didConnect = true
+                sessions[tunnelID] = current
+            }
+            reconnectCandidates.removeValue(forKey: tunnelID)
             updateStatus(id: tunnelID, state: .running, pid: process.processIdentifier)
             appendLog(id: tunnelID, text: "[TunX] 启动 ssh (pid: \(process.processIdentifier))\n")
             appendLog(id: tunnelID, text: "[TunX] 命令: ssh \(invocation.arguments.joined(separator: " "))\n")
         } catch {
+            if let existing = sessions[tunnel.id] {
+                existing.cleanup()
+                sessions.removeValue(forKey: tunnel.id)
+            }
             identityURL?.stopAccessingSecurityScopedResource()
             if let url = credentialURL {
                 try? FileManager.default.removeItem(at: url)
             }
             updateStatus(id: tunnel.id, state: .error, lastError: error.localizedDescription)
             appendLog(id: tunnel.id, text: "[TunX] 启动失败: \(error.localizedDescription)\n")
+            if isReconnect {
+                retryReconnectIfNeeded(for: tunnel, reason: error.localizedDescription)
+            }
         }
     }
 
+    /// 用户停止：标记为手动停止，进程退出后不会自动重连。
     func stop(_ tunnel: Tunnel) {
+        abandonReconnect(for: tunnel.id)
         guard let session = sessions[tunnel.id] else {
-            cancelReconnect(for: tunnel.id)
             updateStatus(id: tunnel.id, state: .stopped)
             return
         }
@@ -228,13 +270,19 @@ final class TunnelManager: ObservableObject {
     }
 
     func stopAll() {
-        for session in sessions.values {
+        let sessionSnapshot = sessions
+        for (id, session) in sessionSnapshot {
+            abandonReconnect(for: id)
+            var updated = session
+            updated.manuallyStopped = true
+            sessions[id] = updated
             session.process.terminate()
         }
-        for task in reconnectTasks.values {
-            task.cancel()
+        let candidateIDs = Array(reconnectCandidates.keys)
+        for id in candidateIDs {
+            abandonReconnect(for: id)
+            updateStatus(id: id, state: .stopped)
         }
-        reconnectTasks.removeAll()
     }
 
     func clearKeychainItems(for tunnel: Tunnel) {
@@ -253,12 +301,14 @@ final class TunnelManager: ObservableObject {
 
     // MARK: - Private
 
+    /// ssh 进程退出。仅“已连接后非手动断开”才会进入重连。
     private func handleTermination(tunnelID: UUID, exitCode: Int) {
         guard let session = sessions[tunnelID] else { return }
         session.cleanup()
         sessions.removeValue(forKey: tunnelID)
 
-        if session.manuallyStopped {
+        if session.manuallyStopped || userStoppedIDs.contains(tunnelID) {
+            abandonReconnect(for: tunnelID)
             updateStatus(id: tunnelID, state: .stopped)
             appendLog(id: tunnelID, text: "[TunX] 已停止\n")
             return
@@ -267,23 +317,114 @@ final class TunnelManager: ObservableObject {
         let errorMessage = exitCode == 0 ? "连接已断开" : "ssh 退出码 \(exitCode)"
         appendLog(id: tunnelID, text: "[TunX] \(errorMessage)\n")
 
+        // 只有曾经运行中的隧道才自动重连；启动失败或手动停止不重连
+        let wasConnected = session.didConnect && statuses[tunnelID]?.state == .running
         let tunnel = session.tunnel
-        guard tunnel.autoReconnect else {
+        guard wasConnected, tunnel.autoReconnect else {
+            reconnectCandidates.removeValue(forKey: tunnelID)
             updateStatus(id: tunnelID, state: .error, lastError: errorMessage)
             return
         }
 
+        reconnectCandidates[tunnelID] = tunnel
+        retryReconnectIfNeeded(for: tunnel, reason: errorMessage)
+    }
+
+    private func observeNetwork() {
+        NetworkMonitor.shared.$isSatisfied
+            .removeDuplicates()
+            .dropFirst() // 忽略订阅时的初始值，只响应后续网络变化
+            .sink { [weak self] isSatisfied in
+                self?.handleNetworkChange(isSatisfied: isSatisfied)
+            }
+            .store(in: &cancellables)
+    }
+
+    /// 网络恢复后稍作延迟再重连，避免路径抖动时立刻发起 ssh。
+    private func handleNetworkChange(isSatisfied: Bool) {
+        networkResumeTask?.cancel()
+        if isSatisfied {
+            networkResumeTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.resumeReconnectsIfNeeded()
+            }
+        } else {
+            pauseReconnectsForOffline()
+        }
+    }
+
+    private func pauseReconnectsForOffline() {
+        // 无网络时取消已安排的重连任务，等路径恢复后再试
+        let waitingIDs = Set(reconnectTasks.keys).union(reconnectCandidates.keys)
+        for task in reconnectTasks.values {
+            task.cancel()
+        }
+        reconnectTasks.removeAll()
+
+        for id in waitingIDs where !userStoppedIDs.contains(id) {
+            updateStatus(id: id, state: .reconnecting, lastError: "无网络，等待恢复")
+            appendLog(id: id, text: "[TunX] 网络已断开，暂停重连，待网络恢复后再试\n")
+        }
+    }
+
+    /// 仅重连：用户未手动停止、且仍在候选队列中的隧道。
+    private func resumeReconnectsIfNeeded() {
+        guard NetworkMonitor.shared.isSatisfied else { return }
+        let pending = reconnectCandidates
+        for (id, tunnel) in pending {
+            guard sessions[id] == nil else { continue }
+            guard !userStoppedIDs.contains(id), tunnel.autoReconnect else {
+                abandonReconnect(for: id)
+                updateStatus(id: id, state: .stopped)
+                continue
+            }
+            appendLog(id: id, text: "[TunX] 网络已恢复，开始重连\n")
+            start(tunnel, isReconnect: true)
+        }
+    }
+
+    private func retryReconnectIfNeeded(for tunnel: Tunnel, reason: String) {
+        guard reconnectCandidates[tunnel.id] != nil else { return }
+        guard !userStoppedIDs.contains(tunnel.id), tunnel.autoReconnect else {
+            abandonReconnect(for: tunnel.id)
+            return
+        }
+        guard NetworkMonitor.shared.isSatisfied else {
+            updateStatus(id: tunnel.id, state: .reconnecting, lastError: "无网络，等待恢复")
+            appendLog(id: tunnel.id, text: "[TunX] 当前无网络，待网络恢复后再重连\n")
+            return
+        }
+        scheduleReconnect(for: tunnel, reason: reason)
+    }
+
+    private func scheduleReconnect(for tunnel: Tunnel, reason: String) {
+        let tunnelID = tunnel.id
         let delay = max(1, tunnel.reconnectDelay)
         let nextAttempt = Date().addingTimeInterval(TimeInterval(delay))
-        updateStatus(id: tunnelID, state: .reconnecting, lastError: errorMessage, nextReconnect: nextAttempt)
+        updateStatus(id: tunnelID, state: .reconnecting, lastError: reason, nextReconnect: nextAttempt)
         appendLog(id: tunnelID, text: "[TunX] 将在 \(delay) 秒后自动重连…\n")
 
         let task = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay) * NSEC_PER_SEC)
-            guard let self = self, self.sessions[tunnelID] == nil else { return }
-            self.start(tunnel)
+            guard let self, !Task.isCancelled else { return }
+            guard self.sessions[tunnelID] == nil else { return }
+            guard !self.userStoppedIDs.contains(tunnelID) else { return }
+            guard NetworkMonitor.shared.isSatisfied else {
+                self.updateStatus(id: tunnelID, state: .reconnecting, lastError: "无网络，等待恢复")
+                self.appendLog(id: tunnelID, text: "[TunX] 当前无网络，待网络恢复后再重连\n")
+                return
+            }
+            self.start(tunnel, isReconnect: true)
         }
         reconnectTasks[tunnelID] = task
+    }
+
+    /// 取消定时重连并记录用户停止意图。
+    private func abandonReconnect(for tunnelID: UUID) {
+        userStoppedIDs.insert(tunnelID)
+        reconnectCandidates.removeValue(forKey: tunnelID)
+        cancelReconnect(for: tunnelID)
     }
 
     private func cancelReconnect(for tunnelID: UUID) {
@@ -307,6 +448,7 @@ final class TunnelManager: ObservableObject {
         refreshActiveConnection()
     }
 
+    /// 刷新状态栏图标亮度：有任意占用中的隧道则为正常颜色。
     private func refreshActiveConnection() {
         let active = statuses.values.contains { $0.state.isActive }
         if hasActiveConnection != active {
@@ -318,6 +460,7 @@ final class TunnelManager: ObservableObject {
         var status = statuses[id] ?? TunnelStatus(tunnelID: id)
         status.log.append(text)
         var lines = status.log.components(separatedBy: "\n")
+        // 限制日志行数，避免长时间运行占用过多内存
         if lines.count > maxLogLines {
             lines = Array(lines.suffix(maxLogLines))
             status.log = lines.joined(separator: "\n")

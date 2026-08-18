@@ -2,12 +2,13 @@
 //  ForwardRule.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import Foundation
 import SwiftData
 
+/// SSH 端口转发类型，对应 OpenSSH 的 `-L` / `-R` / `-D`。
 enum ForwardType: String, Codable, CaseIterable, Identifiable {
     case local = "local"
     case remote = "remote"
@@ -32,9 +33,11 @@ enum ForwardType: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// 单条转发规则。远程转发时 `localHost`/`localPort` 表示远端绑定地址。
 @Model
 final class ForwardRule {
     var id: UUID
+    /// 以字符串持久化转发类型。
     var typeRaw: String
     var localHost: String
     var localPort: Int

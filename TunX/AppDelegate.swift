@@ -2,7 +2,7 @@
 //  AppDelegate.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/16.
+//  Created by glli on 2026/8/16.
 //
 
 import SwiftUI
@@ -10,6 +10,7 @@ import AppKit
 import SwiftData
 import Combine
 
+/// 菜单栏常驻应用代理：状态栏图标、系统菜单与主窗口。
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
@@ -34,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 启动时隐藏 Dock，仅保留状态栏图标
         NSApp.setActivationPolicy(.accessory)
 
         setupStatusItem()
@@ -56,12 +58,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        // 直接绑定菜单后，左键与右键都会弹出系统标准菜单
         item.menu = menu
 
         statusItem = item
         updateStatusBarAppearance(active: TunnelManager.shared.hasActiveConnection)
     }
 
+    /// 自定义 Tx 图标作为 template，以适配浅色/深色菜单栏。
     private func makeStatusBarIcon() -> NSImage? {
         guard let original = NSImage(named: "StatusBarIcon") else {
             return NSImage(systemSymbolName: "network", accessibilityDescription: "TunX")
@@ -113,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
+    /// 全部断开时略微降低透明度，有连接时恢复原色。
     private func updateStatusBarAppearance(active: Bool) {
         guard let button = statusItem?.button else { return }
         button.alphaValue = active ? 1.0 : 0.78
@@ -120,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Status Menu
 
+    /// 每次弹出状态栏菜单时重建，以反映最新隧道与连接状态。
     private func rebuildStatusMenu(_ menu: NSMenu) {
         menu.removeAllItems()
 
@@ -218,6 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TunnelManager.shared.toggle(tunnel)
     }
 
+    /// 打开主窗口时临时显示 Dock，便于 Cmd-Tab 切换。
     @objc private func openMainWindow() {
         mainWindowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.setActivationPolicy(.regular)
@@ -228,11 +235,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 
+    /// 关闭主窗口后重新隐藏 Dock，应用继续在状态栏运行。
     @objc private func mainWindowWillClose(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
     }
 }
 
+/// 每次打开状态栏菜单前刷新隧道列表与连接状态。
 extension AppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         rebuildStatusMenu(menu)

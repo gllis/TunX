@@ -2,11 +2,12 @@
 //  TunnelListRowView.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import SwiftUI
 
+/// 侧边栏中单条隧道的名称、目标与连接状态。
 struct TunnelListRowView: View {
     let tunnel: Tunnel
     @StateObject private var manager = TunnelManager.shared

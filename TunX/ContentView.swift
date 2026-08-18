@@ -2,12 +2,13 @@
 //  ContentView.swift
 //  TunX
 //
-//  Created by liguilong on 2026/8/13.
+//  Created by glli on 2026/8/13.
 //
 
 import SwiftUI
 import SwiftData
 
+/// 主窗口：左侧隧道列表，右侧编辑详情。
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Tunnel.createdAt, order: .reverse) private var tunnels: [Tunnel]
@@ -60,6 +61,7 @@ struct ContentView: View {
     }
 
     private func addTunnel() {
+        // 新建时预置一条本地转发，便于直接改目标后使用
         let defaultRule = ForwardRule(
             type: .local,
             localHost: "127.0.0.1",
@@ -90,6 +92,7 @@ struct ContentView: View {
         }
     }
 
+    /// 删除隧道前先停止进程并清理钥匙串凭证。
     private func deleteTunnel(_ tunnel: Tunnel) {
         manager.stop(tunnel)
         manager.clearKeychainItems(for: tunnel)
