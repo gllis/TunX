@@ -13,9 +13,21 @@ struct TunXApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // 保留空 Settings，避免 SwiftUI App 因缺少 Scene 无法启动
         Settings {
-            EmptyView()
+            SettingsView()
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") {
+                    NotificationCenter.default.post(name: .openTunXSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandGroup(replacing: .undoRedo) {}
+            CommandGroup(replacing: .pasteboard) {}
+            CommandGroup(replacing: .textEditing) {}
+            CommandGroup(replacing: .toolbar) {}
+            CommandGroup(replacing: .sidebar) {}
         }
     }
 }

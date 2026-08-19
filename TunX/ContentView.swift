@@ -33,28 +33,40 @@ struct ContentView: View {
             }
             .navigationTitle("隧道")
             .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+        } detail: {
+            Group {
+                if let tunnel = selectedTunnel {
+                    TunnelEditorView(tunnel: tunnel)
+                        .id(tunnel.id)
+                } else {
+                    ContentUnavailableView {
+                        Label("未选择隧道", systemImage: "network")
+                    } description: {
+                        Text("点击左侧 + 创建或选择一条隧道")
+                    }
+                }
+            }
             .toolbar {
                 ToolbarItem {
                     Button(action: addTunnel) {
-                        Label("新建隧道", systemImage: "plus")
+                        Image(systemName: "plus")
                     }
+                    .help("新建隧道")
                 }
                 ToolbarItem {
                     Button(action: deleteSelectedTunnel) {
-                        Label("删除", systemImage: "trash")
+                        Image(systemName: "trash")
                     }
+                    .help("删除")
                     .disabled(selectedTunnel == nil)
                 }
-            }
-        } detail: {
-            if let tunnel = selectedTunnel {
-                TunnelEditorView(tunnel: tunnel)
-                    .id(tunnel.id)
-            } else {
-                ContentUnavailableView {
-                    Label("未选择隧道", systemImage: "network")
-                } description: {
-                    Text("点击左侧 + 创建或选择一条隧道")
+                ToolbarItem {
+                    Button {
+                        NotificationCenter.default.post(name: .openTunXSettings, object: nil)
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .help("设置")
                 }
             }
         }

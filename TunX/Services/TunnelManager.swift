@@ -8,6 +8,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import Darwin
 
 /// 隧道运行状态。
 enum TunnelState: String {
@@ -65,6 +66,18 @@ struct TunnelStatus {
     var nextReconnect: Date?
 }
 
+/// 启动 ssh 前可预知的失败原因。
+enum TunnelLaunchError: Error, LocalizedError {
+    case missingPassword
+
+    var errorDescription: String? {
+        switch self {
+        case .missingPassword:
+            return "请先填写密码"
+        }
+    }
+}
+
 /// 钥匙串条目账号，按隧道 ID 区分密码与私钥口令。
 enum KeychainAccount {
     static func password(_ id: UUID) -> String { "\(id.uuidString).password" }
@@ -75,20 +88,33 @@ enum KeychainAccount {
 private struct RunningSession {
     let process: Process
     let tunnel: Tunnel
+    let outputPipe: Pipe
     let credentialURL: URL?
     let identityURL: URL?
     /// 用户主动停止，进程退出后不得自动重连。
     var manuallyStopped: Bool = false
-    /// 是否已进入运行中（process.run 成功）。仅此类异常断开才允许重连。
+    /// 认证已成功并稳定运行。仅此类异常断开才允许重连。
     var didConnect: Bool = false
+    /// 密码或密钥认证失败，不得自动重连。
+    var authFailed: Bool = false
 
     func cleanup() {
+        outputPipe.fileHandleForReading.readabilityHandler = nil
         if let url = identityURL {
             url.stopAccessingSecurityScopedResource()
         }
         if let url = credentialURL {
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    /// 进程退出后把管道里剩余输出读完，避免漏掉 Permission denied。
+    func drainRemainingOutput() -> String {
+        outputPipe.fileHandleForReading.readabilityHandler = nil
+        guard let data = try? outputPipe.fileHandleForReading.readToEnd(), !data.isEmpty else {
+            return ""
+        }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }
 
@@ -102,7 +128,13 @@ final class TunnelManager: ObservableObject {
     @Published private(set) var hasActiveConnection = false
 
     private var sessions: [UUID: RunningSession] = [:]
+    /// 本次运行中的密码（未写入钥匙串时也用于连接与重连）。
+    private var sessionPasswords: [UUID: String] = [:]
+    /// 本次运行中的私钥口令。
+    private var sessionKeyPassphrases: [UUID: String] = [:]
     private var reconnectTasks: [UUID: Task<Void, Never>] = [:]
+    /// 启动后需等 ssh 真正认证成功，才视为已连接。
+    private var connectConfirmTasks: [UUID: Task<Void, Never>] = [:]
     /// 曾成功连接、异常断开后等待重连的隧道。
     private var reconnectCandidates: [UUID: Tunnel] = [:]
     /// 用户手动停止过的隧道，网络恢复后不得自动拉起。
@@ -133,6 +165,32 @@ final class TunnelManager: ObservableObject {
         }
     }
 
+    /// 把编辑页中的密码记入内存，即使未保存到钥匙串也能连接。
+    func setSessionPassword(_ password: String, for tunnelID: UUID) {
+        if password.isEmpty {
+            sessionPasswords.removeValue(forKey: tunnelID)
+        } else {
+            sessionPasswords[tunnelID] = password
+        }
+    }
+
+    func sessionPassword(for tunnelID: UUID) -> String? {
+        sessionPasswords[tunnelID]
+    }
+
+    /// 把编辑页中的私钥口令记入内存。
+    func setSessionKeyPassphrase(_ passphrase: String, for tunnelID: UUID) {
+        if passphrase.isEmpty {
+            sessionKeyPassphrases.removeValue(forKey: tunnelID)
+        } else {
+            sessionKeyPassphrases[tunnelID] = passphrase
+        }
+    }
+
+    func sessionKeyPassphrase(for tunnelID: UUID) -> String? {
+        sessionKeyPassphrases[tunnelID]
+    }
+
     /// 用户手动启动。
     func start(_ tunnel: Tunnel) {
         start(tunnel, isReconnect: false)
@@ -153,15 +211,14 @@ final class TunnelManager: ObservableObject {
         var credentialURL: URL?
 
         do {
-            let password: String? = {
-                guard tunnel.authMethod == .password else { return nil }
-                return KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id))
-            }()
+            let password = resolvePassword(for: tunnel)
+            let keyPassphrase = resolveKeyPassphrase(for: tunnel)
 
-            let keyPassphrase: String? = {
-                guard tunnel.authMethod == .identityFile else { return nil }
-                return KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id))
-            }()
+            if tunnel.authMethod == .password {
+                guard let password, !password.isEmpty else {
+                    throw TunnelLaunchError.missingPassword
+                }
+            }
 
             let invocation = try SSHCommandBuilder.build(
                 for: tunnel,
@@ -205,19 +262,18 @@ final class TunnelManager: ObservableObject {
             let session = RunningSession(
                 process: process,
                 tunnel: tunnel,
+                outputPipe: pipe,
                 credentialURL: credentialURL,
                 identityURL: identityURL
             )
             let tunnelID = tunnel.id
             sessions[tunnelID] = session
 
-            pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            pipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
-                guard let self = self,
-                      let text = String(data: data, encoding: .utf8),
-                      !text.isEmpty else { return }
-                Task { @MainActor [tunnelID] in
-                    self.appendLog(id: tunnelID, text: text)
+                guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+                Task { @MainActor [weak self, tunnelID] in
+                    self?.consumeSSHOutput(id: tunnelID, text: text)
                 }
             }
 
@@ -228,15 +284,11 @@ final class TunnelManager: ObservableObject {
             }
 
             try process.run()
-            // process.run 成功即视为已连接，后续异常退出才进入重连队列
-            if var current = sessions[tunnelID] {
-                current.didConnect = true
-                sessions[tunnelID] = current
-            }
             reconnectCandidates.removeValue(forKey: tunnelID)
-            updateStatus(id: tunnelID, state: .running, pid: process.processIdentifier)
+            updateStatus(id: tunnelID, state: .starting, pid: process.processIdentifier)
             appendLog(id: tunnelID, text: "[TunX] 启动 ssh (pid: \(process.processIdentifier))\n")
             appendLog(id: tunnelID, text: "[TunX] 命令: ssh \(invocation.arguments.joined(separator: " "))\n")
+            scheduleConnectConfirmation(for: tunnelID)
         } catch {
             if let existing = sessions[tunnel.id] {
                 existing.cleanup()
@@ -249,7 +301,11 @@ final class TunnelManager: ObservableObject {
             updateStatus(id: tunnel.id, state: .error, lastError: error.localizedDescription)
             appendLog(id: tunnel.id, text: "[TunX] 启动失败: \(error.localizedDescription)\n")
             if isReconnect {
-                retryReconnectIfNeeded(for: tunnel, reason: error.localizedDescription)
+                if error is TunnelLaunchError {
+                    abandonReconnect(for: tunnel.id)
+                } else {
+                    retryReconnectIfNeeded(for: tunnel, reason: error.localizedDescription)
+                }
             }
         }
     }
@@ -257,6 +313,7 @@ final class TunnelManager: ObservableObject {
     /// 用户停止：标记为手动停止，进程退出后不会自动重连。
     func stop(_ tunnel: Tunnel) {
         abandonReconnect(for: tunnel.id)
+        cancelConnectConfirmation(for: tunnel.id)
         guard let session = sessions[tunnel.id] else {
             updateStatus(id: tunnel.id, state: .stopped)
             return
@@ -269,18 +326,45 @@ final class TunnelManager: ObservableObject {
         appendLog(id: tunnel.id, text: "[TunX] 用户请求停止\n")
     }
 
+    /// 结束全部隧道与重连任务。退出应用时会同步等待 ssh 退出，避免留下孤儿进程。
     func stopAll() {
-        let sessionSnapshot = sessions
-        for (id, session) in sessionSnapshot {
+        networkResumeTask?.cancel()
+        networkResumeTask = nil
+        for task in connectConfirmTasks.values {
+            task.cancel()
+        }
+        connectConfirmTasks.removeAll()
+
+        let snapshot = sessions
+        let candidateIDs = Array(reconnectCandidates.keys)
+        for id in Set(snapshot.keys).union(candidateIDs) {
             abandonReconnect(for: id)
+        }
+
+        for (id, session) in snapshot {
             var updated = session
             updated.manuallyStopped = true
             sessions[id] = updated
-            session.process.terminate()
+            session.process.terminationHandler = nil
+            session.outputPipe.fileHandleForReading.readabilityHandler = nil
+            if session.process.isRunning {
+                session.process.terminate()
+            }
         }
-        let candidateIDs = Array(reconnectCandidates.keys)
-        for id in candidateIDs {
-            abandonReconnect(for: id)
+
+        let deadline = Date().addingTimeInterval(0.8)
+        for (_, session) in snapshot {
+            while session.process.isRunning, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if session.process.isRunning {
+                kill(session.process.processIdentifier, SIGKILL)
+            }
+            session.cleanup()
+        }
+
+        sessions.removeAll()
+        for id in Set(snapshot.keys).union(candidateIDs) {
             updateStatus(id: id, state: .stopped)
         }
     }
@@ -288,6 +372,25 @@ final class TunnelManager: ObservableObject {
     func clearKeychainItems(for tunnel: Tunnel) {
         try? KeychainManager.shared.deletePassword(account: KeychainAccount.password(tunnel.id))
         try? KeychainManager.shared.deletePassword(account: KeychainAccount.keyPassphrase(tunnel.id))
+        sessionPasswords.removeValue(forKey: tunnel.id)
+        sessionKeyPassphrases.removeValue(forKey: tunnel.id)
+    }
+
+    /// 内存中的凭证优先，没有再读钥匙串。
+    private func resolvePassword(for tunnel: Tunnel) -> String? {
+        guard tunnel.authMethod == .password else { return nil }
+        if let session = sessionPasswords[tunnel.id], !session.isEmpty {
+            return session
+        }
+        return KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id))
+    }
+
+    private func resolveKeyPassphrase(for tunnel: Tunnel) -> String? {
+        guard tunnel.authMethod == .identityFile else { return nil }
+        if let session = sessionKeyPassphrases[tunnel.id], !session.isEmpty {
+            return session
+        }
+        return KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id))
     }
 
     func generatedCommand(for tunnel: Tunnel) -> String {
@@ -301,25 +404,42 @@ final class TunnelManager: ObservableObject {
 
     // MARK: - Private
 
-    /// ssh 进程退出。仅“已连接后非手动断开”才会进入重连。
+    /// ssh 进程退出。仅“已认证连接后非手动断开”才会进入重连。
     private func handleTermination(tunnelID: UUID, exitCode: Int) {
         guard let session = sessions[tunnelID] else { return }
-        session.cleanup()
+        cancelConnectConfirmation(for: tunnelID)
+
+        let leftover = session.drainRemainingOutput()
+        if !leftover.isEmpty {
+            consumeSSHOutput(id: tunnelID, text: leftover)
+        }
+
+        let latest = sessions[tunnelID] ?? session
+        latest.cleanup()
         sessions.removeValue(forKey: tunnelID)
 
-        if session.manuallyStopped || userStoppedIDs.contains(tunnelID) {
+        if latest.manuallyStopped || userStoppedIDs.contains(tunnelID) {
             abandonReconnect(for: tunnelID)
             updateStatus(id: tunnelID, state: .stopped)
             appendLog(id: tunnelID, text: "[TunX] 已停止\n")
             return
         }
 
+        let combinedLog = (statuses[tunnelID]?.log ?? "") + leftover
+        if latest.authFailed || SSHOutputClassifier.isAuthenticationFailure(combinedLog) {
+            abandonReconnect(for: tunnelID)
+            let message = "认证失败，请检查密码或密钥"
+            updateStatus(id: tunnelID, state: .error, lastError: message)
+            appendLog(id: tunnelID, text: "[TunX] \(message)\n")
+            return
+        }
+
         let errorMessage = exitCode == 0 ? "连接已断开" : "ssh 退出码 \(exitCode)"
         appendLog(id: tunnelID, text: "[TunX] \(errorMessage)\n")
 
-        // 只有曾经运行中的隧道才自动重连；启动失败或手动停止不重连
-        let wasConnected = session.didConnect && statuses[tunnelID]?.state == .running
-        let tunnel = session.tunnel
+        // 启动阶段失败（含密码错误）不重连；只有曾经运行中的隧道才自动重连
+        let wasConnected = latest.didConnect && statuses[tunnelID]?.state == .running
+        let tunnel = latest.tunnel
         guard wasConnected, tunnel.autoReconnect else {
             reconnectCandidates.removeValue(forKey: tunnelID)
             updateStatus(id: tunnelID, state: .error, lastError: errorMessage)
@@ -328,6 +448,41 @@ final class TunnelManager: ObservableObject {
 
         reconnectCandidates[tunnelID] = tunnel
         retryReconnectIfNeeded(for: tunnel, reason: errorMessage)
+    }
+
+    private func consumeSSHOutput(id: UUID, text: String) {
+        appendLog(id: id, text: text)
+        guard var session = sessions[id], !session.authFailed else { return }
+        if SSHOutputClassifier.isAuthenticationFailure(text) {
+            session.authFailed = true
+            sessions[id] = session
+            cancelConnectConfirmation(for: id)
+        }
+    }
+
+    /// ssh 进程能跑起来不等于已经认证成功，稍等后再标为运行中。
+    private func scheduleConnectConfirmation(for tunnelID: UUID) {
+        cancelConnectConfirmation(for: tunnelID)
+        connectConfirmTasks[tunnelID] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.confirmConnectionIfNeeded(tunnelID)
+        }
+    }
+
+    private func cancelConnectConfirmation(for tunnelID: UUID) {
+        connectConfirmTasks[tunnelID]?.cancel()
+        connectConfirmTasks.removeValue(forKey: tunnelID)
+    }
+
+    private func confirmConnectionIfNeeded(_ tunnelID: UUID) {
+        guard var session = sessions[tunnelID] else { return }
+        guard session.process.isRunning, !session.manuallyStopped, !session.authFailed else { return }
+        session.didConnect = true
+        sessions[tunnelID] = session
+        reconnectCandidates.removeValue(forKey: tunnelID)
+        updateStatus(id: tunnelID, state: .running, pid: session.process.processIdentifier)
+        appendLog(id: tunnelID, text: "[TunX] 连接已建立\n")
     }
 
     private func observeNetwork() {
@@ -441,9 +596,31 @@ final class TunnelManager: ObservableObject {
     ) {
         var status = statuses[id] ?? TunnelStatus(tunnelID: id)
         status.state = state
-        if let lastError = lastError { status.lastError = lastError }
-        if let pid = pid { status.pid = pid }
-        if let nextReconnect = nextReconnect { status.nextReconnect = nextReconnect }
+
+        switch state {
+        case .stopped, .stopping:
+            // 用户停止或结束重连后，不再保留失败原因与下次重连时间
+            status.lastError = nil
+            status.nextReconnect = nil
+            status.pid = nil
+        case .running:
+            status.lastError = nil
+            status.nextReconnect = nil
+            if let pid { status.pid = pid }
+        case .starting:
+            status.nextReconnect = nil
+            status.lastError = lastError
+            if let pid { status.pid = pid }
+        case .reconnecting:
+            status.pid = nil
+            if let lastError { status.lastError = lastError }
+            status.nextReconnect = nextReconnect
+        case .error:
+            status.pid = nil
+            status.nextReconnect = nil
+            if let lastError { status.lastError = lastError }
+        }
+
         statuses[id] = status
         refreshActiveConnection()
     }
@@ -466,5 +643,21 @@ final class TunnelManager: ObservableObject {
             status.log = lines.joined(separator: "\n")
         }
         statuses[id] = status
+    }
+}
+
+/// 从 OpenSSH 输出判断是否为不可重试的认证失败。
+private enum SSHOutputClassifier {
+    static func isAuthenticationFailure(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let markers = [
+            "permission denied",
+            "authentication failed",
+            "too many authentication failures",
+            "incorrect passphrase",
+            "wrong passphrase",
+            "bad passphrase"
+        ]
+        return markers.contains { lower.contains($0) }
     }
 }

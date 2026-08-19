@@ -34,10 +34,12 @@ final class SSHCommandBuilder {
         password: String? = nil,
         keyPassphrase: String? = nil
     ) throws -> SSHInvocation {
+        let aliveInterval = AppSettings.sshServerAliveInterval
+        let aliveCountMax = AppSettings.sshServerAliveCountMax
         var args: [String] = [
             "-N", // 只做端口转发，不打开远程 shell
-            "-o", "ServerAliveInterval=60",
-            "-o", "ServerAliveCountMax=3",
+            "-o", "ServerAliveInterval=\(aliveInterval)",
+            "-o", "ServerAliveCountMax=\(aliveCountMax)",
             "-o", "ExitOnForwardFailure=yes",
             "-o", "BatchMode=no"
         ]
@@ -57,7 +59,8 @@ final class SSHCommandBuilder {
         case .password:
             args += [
                 "-o", "PreferredAuthentications=password",
-                "-o", "PubkeyAuthentication=no"
+                "-o", "PubkeyAuthentication=no",
+                "-o", "NumberOfPasswordPrompts=1"
             ]
             credential = password
         }

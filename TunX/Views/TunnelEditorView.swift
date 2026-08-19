@@ -14,6 +14,7 @@ struct TunnelEditorView: View {
     @Bindable var tunnel: Tunnel
 
     @StateObject private var manager = TunnelManager.shared
+    @ObservedObject private var settings = AppSettings.shared
 
     @State private var password: String = ""
     @State private var savePassword: Bool = false
@@ -82,22 +83,22 @@ struct TunnelEditorView: View {
                 }
             }
 
-            Section("状态与日志") {
-                HStack(alignment: .top, spacing: 12) {
+            Section(settings.showLogs ? "状态与日志" : "状态") {
+                HStack(alignment: .center, spacing: 12) {
                     StatusBadge(state: status.state)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        if let pid = status.pid {
+                        if let pid = status.pid, status.state.isActive {
                             Text("进程 PID: \(pid)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        if let error = status.lastError {
+                        if (status.state == .error || status.state == .reconnecting), let error = status.lastError {
                             Text("错误: \(error)")
                                 .font(.caption)
                                 .foregroundStyle(.red)
                         }
-                        if let next = status.nextReconnect {
+                        if status.state == .reconnecting, let next = status.nextReconnect {
                             Text("下次重连: \(next, format: .dateTime)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -107,6 +108,7 @@ struct TunnelEditorView: View {
                     Spacer()
 
                     Button(manager.isRunning(tunnel) ? "停止" : "启动") {
+                        syncSessionCredentials()
                         manager.toggle(tunnel)
                     }
                     .buttonStyle(.borderedProminent)
@@ -130,8 +132,10 @@ struct TunnelEditorView: View {
                     .background(Color.secondary.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                LogView(log: status.log)
-                    .frame(minHeight: 120)
+                if settings.showLogs {
+                    LogView(log: status.log)
+                        .frame(minHeight: 120)
+                }
             }
         }
         .formStyle(.grouped)
@@ -141,15 +145,19 @@ struct TunnelEditorView: View {
         }
         .onChange(of: savePassword) { _, newValue in
             persistPassword(save: newValue)
+            syncSessionCredentials()
         }
         .onChange(of: password) { _, _ in
             if savePassword { persistPassword(save: true) }
+            syncSessionCredentials()
         }
         .onChange(of: saveKeyPassphrase) { _, newValue in
             persistKeyPassphrase(save: newValue)
+            syncSessionCredentials()
         }
         .onChange(of: keyPassphrase) { _, _ in
             if saveKeyPassphrase { persistKeyPassphrase(save: true) }
+            syncSessionCredentials()
         }
     }
 
@@ -183,15 +191,38 @@ struct TunnelEditorView: View {
 
     // MARK: - Keychain
 
-    /// 从钥匙串与书签恢复密码、口令及私钥路径。
+    /// 从钥匙串或本次运行的内存凭证恢复密码、口令及私钥路径。
     private func loadPersistedValues() {
-        password = KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id)) ?? ""
-        savePassword = !password.isEmpty
+        if let saved = KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id)), !saved.isEmpty {
+            password = saved
+            savePassword = true
+        } else if let session = manager.sessionPassword(for: tunnel.id), !session.isEmpty {
+            password = session
+            savePassword = false
+        } else {
+            password = ""
+            savePassword = false
+        }
 
-        keyPassphrase = KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id)) ?? ""
-        saveKeyPassphrase = !keyPassphrase.isEmpty
+        if let saved = KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id)), !saved.isEmpty {
+            keyPassphrase = saved
+            saveKeyPassphrase = true
+        } else if let session = manager.sessionKeyPassphrase(for: tunnel.id), !session.isEmpty {
+            keyPassphrase = session
+            saveKeyPassphrase = false
+        } else {
+            keyPassphrase = ""
+            saveKeyPassphrase = false
+        }
 
+        syncSessionCredentials()
         loadIdentityBookmark()
+    }
+
+    /// 把当前输入记入内存，供启动、状态栏菜单和自动重连使用。
+    private func syncSessionCredentials() {
+        manager.setSessionPassword(password, for: tunnel.id)
+        manager.setSessionKeyPassphrase(keyPassphrase, for: tunnel.id)
     }
 
     private func loadIdentityBookmark() {
