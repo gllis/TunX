@@ -69,11 +69,17 @@ struct TunnelStatus {
 /// 启动 ssh 前可预知的失败原因。
 enum TunnelLaunchError: Error, LocalizedError {
     case missingPassword
+    case missingIdentityFile
+    case identityFileUnreadable
 
     var errorDescription: String? {
         switch self {
         case .missingPassword:
             return "请先填写密码"
+        case .missingIdentityFile:
+            return "请选择私钥文件"
+        case .identityFileUnreadable:
+            return "无法读取私钥文件，请重新选择"
         }
     }
 }
@@ -90,18 +96,17 @@ private struct RunningSession {
     let tunnel: Tunnel
     let outputPipe: Pipe
     let credentialURL: URL?
+    /// 拷入沙盒临时目录的私钥副本，会话结束时删除。
     let identityURL: URL?
     /// 用户主动停止，进程退出后不得自动重连。
     var manuallyStopped: Bool = false
     /// 认证已成功并稳定运行。仅此类异常断开才允许重连。
     var didConnect: Bool = false
-    /// 密码或密钥认证失败，不得自动重连。
-    var authFailed: Bool = false
 
     func cleanup() {
         outputPipe.fileHandleForReading.readabilityHandler = nil
         if let url = identityURL {
-            url.stopAccessingSecurityScopedResource()
+            try? FileManager.default.removeItem(at: url)
         }
         if let url = credentialURL {
             try? FileManager.default.removeItem(at: url)
@@ -220,20 +225,18 @@ final class TunnelManager: ObservableObject {
                 }
             }
 
+            if tunnel.authMethod == .identityFile {
+                identityURL = try copyIdentityIntoSandbox(for: tunnel)
+            }
+
             let invocation = try SSHCommandBuilder.build(
                 for: tunnel,
                 password: password,
-                keyPassphrase: keyPassphrase
+                keyPassphrase: keyPassphrase,
+                identityFilePath: identityURL?.path
             )
 
             var environment = ProcessInfo.processInfo.environment
-
-            // 安全作用域书签：启动前开始访问私钥文件
-            if tunnel.authMethod == .identityFile,
-               let bookmarkData = tunnel.identityBookmarkData {
-                identityURL = try SecurityScopedBookmark.resolve(bookmarkData)
-                _ = identityURL?.startAccessingSecurityScopedResource()
-            }
 
             // 凭证通过 Bundle 内的 askpass 脚本 + 临时文件注入
             if let credential = invocation.credential, !credential.isEmpty {
@@ -242,7 +245,12 @@ final class TunnelManager: ObservableObject {
                 }
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("tunx-cred-\(UUID().uuidString).txt")
-                try credential.write(to: url, atomically: true, encoding: .utf8)
+                let payload = credential.hasSuffix("\n") ? credential : credential + "\n"
+                try payload.write(to: url, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: url.path
+                )
                 environment["TUNX_SSH_ASKPASS_FILE"] = url.path
                 environment["SSH_ASKPASS"] = askpassScript.path
                 environment["SSH_ASKPASS_REQUIRE"] = "force"
@@ -254,6 +262,8 @@ final class TunnelManager: ObservableObject {
             process.executableURL = URL(fileURLWithPath: SSHCommandBuilder.sshPath)
             process.arguments = invocation.arguments
             process.environment = environment
+            // 无 TTY 时必须把 stdin 接到 /dev/null，否则 ssh 可能不走 SSH_ASKPASS
+            process.standardInput = FileHandle.nullDevice
 
             let pipe = Pipe()
             process.standardOutput = pipe
@@ -273,7 +283,7 @@ final class TunnelManager: ObservableObject {
                 let data = handle.availableData
                 guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
                 Task { @MainActor [weak self, tunnelID] in
-                    self?.consumeSSHOutput(id: tunnelID, text: text)
+                    self?.appendLog(id: tunnelID, text: text)
                 }
             }
 
@@ -294,7 +304,9 @@ final class TunnelManager: ObservableObject {
                 existing.cleanup()
                 sessions.removeValue(forKey: tunnel.id)
             }
-            identityURL?.stopAccessingSecurityScopedResource()
+            if let url = identityURL {
+                try? FileManager.default.removeItem(at: url)
+            }
             if let url = credentialURL {
                 try? FileManager.default.removeItem(at: url)
             }
@@ -393,6 +405,42 @@ final class TunnelManager: ObservableObject {
         return KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id))
     }
 
+    /// 把私钥拷进容器临时目录，避免 ssh 子进程无法继承安全作用域访问权。
+    private func copyIdentityIntoSandbox(for tunnel: Tunnel) throws -> URL {
+        let source: URL
+        var scoped = false
+        if let bookmarkData = tunnel.identityBookmarkData {
+            source = try SecurityScopedBookmark.resolve(bookmarkData)
+            guard source.startAccessingSecurityScopedResource() else {
+                throw TunnelLaunchError.identityFileUnreadable
+            }
+            scoped = true
+        } else if let path = tunnel.identityFilePath, !path.isEmpty {
+            source = URL(fileURLWithPath: path)
+        } else {
+            throw TunnelLaunchError.missingIdentityFile
+        }
+        defer {
+            if scoped {
+                source.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tunx-id-\(UUID().uuidString)")
+        do {
+            try FileManager.default.copyItem(at: source, to: destination)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: destination.path
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw TunnelLaunchError.identityFileUnreadable
+        }
+        return destination
+    }
+
     func generatedCommand(for tunnel: Tunnel) -> String {
         do {
             let invocation = try SSHCommandBuilder.build(for: tunnel)
@@ -411,14 +459,13 @@ final class TunnelManager: ObservableObject {
 
         let leftover = session.drainRemainingOutput()
         if !leftover.isEmpty {
-            consumeSSHOutput(id: tunnelID, text: leftover)
+            appendLog(id: tunnelID, text: leftover)
         }
 
-        let latest = sessions[tunnelID] ?? session
-        latest.cleanup()
+        session.cleanup()
         sessions.removeValue(forKey: tunnelID)
 
-        if latest.manuallyStopped || userStoppedIDs.contains(tunnelID) {
+        if session.manuallyStopped || userStoppedIDs.contains(tunnelID) {
             abandonReconnect(for: tunnelID)
             updateStatus(id: tunnelID, state: .stopped)
             appendLog(id: tunnelID, text: "[TunX] 已停止\n")
@@ -426,7 +473,7 @@ final class TunnelManager: ObservableObject {
         }
 
         let combinedLog = (statuses[tunnelID]?.log ?? "") + leftover
-        if latest.authFailed || SSHOutputClassifier.isAuthenticationFailure(combinedLog) {
+        if SSHOutputClassifier.isAuthenticationFailure(combinedLog) {
             abandonReconnect(for: tunnelID)
             let message = "认证失败，请检查密码或密钥"
             updateStatus(id: tunnelID, state: .error, lastError: message)
@@ -438,8 +485,8 @@ final class TunnelManager: ObservableObject {
         appendLog(id: tunnelID, text: "[TunX] \(errorMessage)\n")
 
         // 启动阶段失败（含密码错误）不重连；只有曾经运行中的隧道才自动重连
-        let wasConnected = latest.didConnect && statuses[tunnelID]?.state == .running
-        let tunnel = latest.tunnel
+        let wasConnected = session.didConnect && statuses[tunnelID]?.state == .running
+        let tunnel = session.tunnel
         guard wasConnected, tunnel.autoReconnect else {
             reconnectCandidates.removeValue(forKey: tunnelID)
             updateStatus(id: tunnelID, state: .error, lastError: errorMessage)
@@ -448,16 +495,6 @@ final class TunnelManager: ObservableObject {
 
         reconnectCandidates[tunnelID] = tunnel
         retryReconnectIfNeeded(for: tunnel, reason: errorMessage)
-    }
-
-    private func consumeSSHOutput(id: UUID, text: String) {
-        appendLog(id: id, text: text)
-        guard var session = sessions[id], !session.authFailed else { return }
-        if SSHOutputClassifier.isAuthenticationFailure(text) {
-            session.authFailed = true
-            sessions[id] = session
-            cancelConnectConfirmation(for: id)
-        }
     }
 
     /// ssh 进程能跑起来不等于已经认证成功，稍等后再标为运行中。
@@ -477,7 +514,7 @@ final class TunnelManager: ObservableObject {
 
     private func confirmConnectionIfNeeded(_ tunnelID: UUID) {
         guard var session = sessions[tunnelID] else { return }
-        guard session.process.isRunning, !session.manuallyStopped, !session.authFailed else { return }
+        guard session.process.isRunning, !session.manuallyStopped else { return }
         session.didConnect = true
         sessions[tunnelID] = session
         reconnectCandidates.removeValue(forKey: tunnelID)

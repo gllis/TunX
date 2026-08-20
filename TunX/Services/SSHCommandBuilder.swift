@@ -32,7 +32,8 @@ final class SSHCommandBuilder {
     static func build(
         for tunnel: Tunnel,
         password: String? = nil,
-        keyPassphrase: String? = nil
+        keyPassphrase: String? = nil,
+        identityFilePath: String? = nil
     ) throws -> SSHInvocation {
         let aliveInterval = AppSettings.sshServerAliveInterval
         let aliveCountMax = AppSettings.sshServerAliveCountMax
@@ -52,9 +53,20 @@ final class SSHCommandBuilder {
 
         switch tunnel.authMethod {
         case .identityFile:
-            if let path = tunnel.identityFilePath, !path.isEmpty {
-                args += ["-i", path]
+            let identityPath = identityFilePath ?? tunnel.identityFilePath
+            if let identityPath, !identityPath.isEmpty {
+                args += ["-i", identityPath]
             }
+            // 只用指定私钥；关闭钥匙串以免拦截口令导致 ASKPASS 无效
+            args += [
+                "-o", "IdentitiesOnly=yes",
+                "-o", "PreferredAuthentications=publickey",
+                "-o", "PubkeyAuthentication=yes",
+                "-o", "PasswordAuthentication=no",
+                "-o", "KbdInteractiveAuthentication=no",
+                "-o", "UseKeychain=no",
+                "-o", "AddKeysToAgent=no"
+            ]
             credential = keyPassphrase
         case .password:
             args += [
