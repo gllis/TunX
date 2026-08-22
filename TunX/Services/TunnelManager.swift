@@ -84,12 +84,6 @@ enum TunnelLaunchError: Error, LocalizedError {
     }
 }
 
-/// 钥匙串条目账号，按隧道 ID 区分密码与私钥口令。
-enum KeychainAccount {
-    static func password(_ id: UUID) -> String { "\(id.uuidString).password" }
-    static func keyPassphrase(_ id: UUID) -> String { "\(id.uuidString).keyPassphrase" }
-}
-
 /// 正在运行的 ssh 进程及其沙盒资源。
 private struct RunningSession {
     let process: Process
@@ -133,10 +127,6 @@ final class TunnelManager: ObservableObject {
     @Published private(set) var hasActiveConnection = false
 
     private var sessions: [UUID: RunningSession] = [:]
-    /// 本次运行中的密码（未写入钥匙串时也用于连接与重连）。
-    private var sessionPasswords: [UUID: String] = [:]
-    /// 本次运行中的私钥口令。
-    private var sessionKeyPassphrases: [UUID: String] = [:]
     private var reconnectTasks: [UUID: Task<Void, Never>] = [:]
     /// 启动后需等 ssh 真正认证成功，才视为已连接。
     private var connectConfirmTasks: [UUID: Task<Void, Never>] = [:]
@@ -168,32 +158,6 @@ final class TunnelManager: ObservableObject {
         } else {
             start(tunnel)
         }
-    }
-
-    /// 把编辑页中的密码记入内存，即使未保存到钥匙串也能连接。
-    func setSessionPassword(_ password: String, for tunnelID: UUID) {
-        if password.isEmpty {
-            sessionPasswords.removeValue(forKey: tunnelID)
-        } else {
-            sessionPasswords[tunnelID] = password
-        }
-    }
-
-    func sessionPassword(for tunnelID: UUID) -> String? {
-        sessionPasswords[tunnelID]
-    }
-
-    /// 把编辑页中的私钥口令记入内存。
-    func setSessionKeyPassphrase(_ passphrase: String, for tunnelID: UUID) {
-        if passphrase.isEmpty {
-            sessionKeyPassphrases.removeValue(forKey: tunnelID)
-        } else {
-            sessionKeyPassphrases[tunnelID] = passphrase
-        }
-    }
-
-    func sessionKeyPassphrase(for tunnelID: UUID) -> String? {
-        sessionKeyPassphrases[tunnelID]
     }
 
     /// 用户手动启动。
@@ -381,28 +345,21 @@ final class TunnelManager: ObservableObject {
         }
     }
 
-    func clearKeychainItems(for tunnel: Tunnel) {
-        try? KeychainManager.shared.deletePassword(account: KeychainAccount.password(tunnel.id))
-        try? KeychainManager.shared.deletePassword(account: KeychainAccount.keyPassphrase(tunnel.id))
-        sessionPasswords.removeValue(forKey: tunnel.id)
-        sessionKeyPassphrases.removeValue(forKey: tunnel.id)
+    func clearStoredCredentials(for tunnel: Tunnel) {
+        CredentialStore.shared.removeSecrets(for: [
+            CredentialAccount.password(tunnel.id),
+            CredentialAccount.keyPassphrase(tunnel.id)
+        ])
     }
 
-    /// 内存中的凭证优先，没有再读钥匙串。
     private func resolvePassword(for tunnel: Tunnel) -> String? {
         guard tunnel.authMethod == .password else { return nil }
-        if let session = sessionPasswords[tunnel.id], !session.isEmpty {
-            return session
-        }
-        return KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id))
+        return CredentialStore.shared.secret(for: CredentialAccount.password(tunnel.id))
     }
 
     private func resolveKeyPassphrase(for tunnel: Tunnel) -> String? {
         guard tunnel.authMethod == .identityFile else { return nil }
-        if let session = sessionKeyPassphrases[tunnel.id], !session.isEmpty {
-            return session
-        }
-        return KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id))
+        return CredentialStore.shared.secret(for: CredentialAccount.keyPassphrase(tunnel.id))
     }
 
     /// 把私钥拷进容器临时目录，避免 ssh 子进程无法继承安全作用域访问权。

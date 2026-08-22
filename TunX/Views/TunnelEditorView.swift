@@ -17,9 +17,7 @@ struct TunnelEditorView: View {
     @ObservedObject private var settings = AppSettings.shared
 
     @State private var password: String = ""
-    @State private var savePassword: Bool = false
     @State private var keyPassphrase: String = ""
-    @State private var saveKeyPassphrase: Bool = false
 
     var body: some View {
         let status = manager.status(for: tunnel)
@@ -45,15 +43,17 @@ struct TunnelEditorView: View {
 
                 if tunnel.authMethod == .password {
                     SecureField("密码", text: $password)
-                    Toggle("保存到钥匙串", isOn: $savePassword)
                 } else {
                     HStack {
                         TextField("私钥路径", text: identityFileBinding)
                         Button("选择…") { chooseIdentityFile() }
                     }
                     SecureField("私钥口令（如已加密）", text: $keyPassphrase)
-                    Toggle("保存口令到钥匙串", isOn: $saveKeyPassphrase)
                 }
+
+                Text("凭证以加密方式保存在本应用数据目录中")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("转发规则") {
@@ -89,7 +89,7 @@ struct TunnelEditorView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         if let pid = status.pid, status.state.isActive {
-                            Text("进程 PID: \(pid)")
+                            Text("进程 PID: \(String(pid))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -108,7 +108,6 @@ struct TunnelEditorView: View {
                     Spacer()
 
                     Button(manager.isRunning(tunnel) ? "停止" : "启动") {
-                        syncSessionCredentials()
                         manager.toggle(tunnel)
                     }
                     .buttonStyle(.borderedProminent)
@@ -143,21 +142,11 @@ struct TunnelEditorView: View {
         .onAppear {
             loadPersistedValues()
         }
-        .onChange(of: savePassword) { _, newValue in
-            persistPassword(save: newValue)
-            syncSessionCredentials()
+        .onChange(of: password) { _, newValue in
+            CredentialStore.shared.setSecret(newValue, for: CredentialAccount.password(tunnel.id))
         }
-        .onChange(of: password) { _, _ in
-            if savePassword { persistPassword(save: true) }
-            syncSessionCredentials()
-        }
-        .onChange(of: saveKeyPassphrase) { _, newValue in
-            persistKeyPassphrase(save: newValue)
-            syncSessionCredentials()
-        }
-        .onChange(of: keyPassphrase) { _, _ in
-            if saveKeyPassphrase { persistKeyPassphrase(save: true) }
-            syncSessionCredentials()
+        .onChange(of: keyPassphrase) { _, newValue in
+            CredentialStore.shared.setSecret(newValue, for: CredentialAccount.keyPassphrase(tunnel.id))
         }
     }
 
@@ -189,40 +178,14 @@ struct TunnelEditorView: View {
         )
     }
 
-    // MARK: - Keychain
+    // MARK: - Credentials
 
-    /// 从钥匙串或本次运行的内存凭证恢复密码、口令及私钥路径。
+    /// 从本地加密存储恢复密码、口令及私钥路径。
     private func loadPersistedValues() {
-        if let saved = KeychainManager.shared.readPassword(account: KeychainAccount.password(tunnel.id)), !saved.isEmpty {
-            password = saved
-            savePassword = true
-        } else if let session = manager.sessionPassword(for: tunnel.id), !session.isEmpty {
-            password = session
-            savePassword = false
-        } else {
-            password = ""
-            savePassword = false
-        }
-
-        if let saved = KeychainManager.shared.readPassword(account: KeychainAccount.keyPassphrase(tunnel.id)), !saved.isEmpty {
-            keyPassphrase = saved
-            saveKeyPassphrase = true
-        } else if let session = manager.sessionKeyPassphrase(for: tunnel.id), !session.isEmpty {
-            keyPassphrase = session
-            saveKeyPassphrase = false
-        } else {
-            keyPassphrase = ""
-            saveKeyPassphrase = false
-        }
-
-        syncSessionCredentials()
+        let store = CredentialStore.shared
+        password = store.secret(for: CredentialAccount.password(tunnel.id)) ?? ""
+        keyPassphrase = store.secret(for: CredentialAccount.keyPassphrase(tunnel.id)) ?? ""
         loadIdentityBookmark()
-    }
-
-    /// 把当前输入记入内存，供启动、状态栏菜单和自动重连使用。
-    private func syncSessionCredentials() {
-        manager.setSessionPassword(password, for: tunnel.id)
-        manager.setSessionKeyPassphrase(keyPassphrase, for: tunnel.id)
     }
 
     private func loadIdentityBookmark() {
@@ -233,30 +196,6 @@ struct TunnelEditorView: View {
         } catch {
             print("私钥书签已失效: \(error)")
             tunnel.identityBookmarkData = nil
-        }
-    }
-
-    private func persistPassword(save: Bool) {
-        do {
-            if save {
-                try KeychainManager.shared.savePassword(password, account: KeychainAccount.password(tunnel.id), label: "TunX 密码 – \(tunnel.displayName)")
-            } else {
-                try KeychainManager.shared.deletePassword(account: KeychainAccount.password(tunnel.id))
-            }
-        } catch {
-            print("钥匙串密码保存失败: \(error)")
-        }
-    }
-
-    private func persistKeyPassphrase(save: Bool) {
-        do {
-            if save {
-                try KeychainManager.shared.savePassword(keyPassphrase, account: KeychainAccount.keyPassphrase(tunnel.id), label: "TunX 私钥口令 – \(tunnel.displayName)")
-            } else {
-                try KeychainManager.shared.deletePassword(account: KeychainAccount.keyPassphrase(tunnel.id))
-            }
-        } catch {
-            print("钥匙串口令保存失败: \(error)")
         }
     }
 

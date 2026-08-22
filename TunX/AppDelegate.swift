@@ -412,8 +412,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let hosting = window.contentViewController {
                 hosting.view.layoutSubtreeIfNeeded()
                 var size = hosting.view.fittingSize
-                if size.width < 460 { size.width = 460 }
-                if size.height < 380 { size.height = 380 }
+                if size.width < 520 { size.width = 520 }
+                if size.height < 400 { size.height = 400 }
                 window.setContentSize(size)
             }
             window.center()

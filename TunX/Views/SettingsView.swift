@@ -69,8 +69,8 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 24)
-        .frame(minWidth: 460, alignment: .leading)
-        .fixedSize(horizontal: true, vertical: true)
+        .frame(minWidth: 520, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
         .background(SettingsTheme.pageBackground(for: colorScheme))
         .onAppear {
             settings.refreshLaunchAtLogin()
@@ -172,7 +172,7 @@ private struct SettingsIntField: View {
             )
             .textFieldStyle(.plain)
             .multilineTextAlignment(.center)
-            .frame(width: 36)
+            .frame(width: 40)
             .onSubmit {
                 value = min(max(value, range.lowerBound), range.upperBound)
             }
@@ -181,8 +181,10 @@ private struct SettingsIntField: View {
                 Text(unit)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+                    .fixedSize()
             }
         }
+        .fixedSize()
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(
@@ -213,6 +215,7 @@ private struct SettingsPill: View {
                 }
                 Text(title)
                     .font(.system(size: 13))
+                    .fixedSize()
             }
             .foregroundStyle(SettingsTheme.controlForeground(for: colorScheme))
             .padding(.horizontal, 14)

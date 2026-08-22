@@ -104,10 +104,10 @@ struct ContentView: View {
         }
     }
 
-    /// 删除隧道前先停止进程并清理钥匙串凭证。
+    /// 删除隧道前先停止进程并清理本地凭证。
     private func deleteTunnel(_ tunnel: Tunnel) {
         manager.stop(tunnel)
-        manager.clearKeychainItems(for: tunnel)
+        manager.clearStoredCredentials(for: tunnel)
         modelContext.delete(tunnel)
         if selectedTunnelID == tunnel.id {
             selectedTunnelID = nil
